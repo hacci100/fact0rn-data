@@ -51,11 +51,30 @@ def save_to_database(block_index, block_hash, unix_timestamp, formatted_time, ti
     try:
         connection = get_db_connection()
         cursor = connection.cursor()
+        
+        # Fetch current hashrate
+        current_hashrate = fetch_current_hashrate()
+        
+        # Insert into block_data table with correct column names
         cursor.execute("""
-            INSERT INTO block_data (block_index, block_hash, unix_timestamp, formatted_time, time_difference)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (block_index) DO NOTHING;
-        """, (block_index, block_hash, unix_timestamp, formatted_time, time_difference))
+            INSERT INTO block_data (
+                current_block_number, 
+                current_block_timestamp, 
+                previous_block_number, 
+                previous_block_timestamp, 
+                block_time_interval_seconds,
+                network_hashrate
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (current_block_number) DO NOTHING;
+        """, (
+            block_index, 
+            unix_timestamp, 
+            block_index - 1, 
+            unix_timestamp - time_difference, 
+            time_difference,
+            current_hashrate
+        ))
         connection.commit()
         print(f"Data for block {block_index} saved to database.")
     except psycopg2.Error as e:
