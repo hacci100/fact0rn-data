@@ -161,19 +161,25 @@ def get_stats():
         # Get average block time (last 100 blocks)
         cursor.execute("""
             SELECT AVG(block_time_interval_seconds)
-            FROM block_data
-            ORDER BY current_block_number DESC
-            LIMIT 100
+            FROM (
+                SELECT block_time_interval_seconds 
+                FROM block_data 
+                ORDER BY current_block_number DESC 
+                LIMIT 100
+            ) as recent_blocks
         """)
         avg_block_time = cursor.fetchone()[0]
         
         # Get average hashrate (last 100 blocks)
         cursor.execute("""
             SELECT AVG(network_hashrate)
-            FROM block_data
-            WHERE network_hashrate IS NOT NULL
-            ORDER BY current_block_number DESC
-            LIMIT 100
+            FROM (
+                SELECT network_hashrate 
+                FROM block_data 
+                WHERE network_hashrate IS NOT NULL
+                ORDER BY current_block_number DESC 
+                LIMIT 100
+            ) as recent_blocks
         """)
         avg_hashrate = cursor.fetchone()[0]
         
