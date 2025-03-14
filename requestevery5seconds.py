@@ -44,7 +44,7 @@ def fetch_api_data(endpoint):
         return None
 
 def format_unix_time(unix_time):
-    return datetime.fromtimestamp(unix_time, UTC)
+    return datetime.fromtimestamp(unix_time, timezone.utc)
 
 def save_to_database(block_index, block_hash, unix_timestamp, formatted_time, time_difference):
     """Save block data to PostgreSQL database."""
