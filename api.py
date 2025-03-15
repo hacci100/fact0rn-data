@@ -8,7 +8,6 @@ import datetime
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
-# ... rest of your code ...
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
