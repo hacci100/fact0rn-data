@@ -37,6 +37,18 @@ try:
     );
     ''')
 
+    # Create market_data table
+    print("Creating market_data table if it doesn't exist...")
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS market_data (
+        id SERIAL PRIMARY KEY,
+        unix_timestamp bigint,
+        date_time timestamp,
+        price numeric,
+        difficulty numeric
+    );
+    ''')
+
     conn.commit()
     print('Tables created successfully')
     cursor.close()
