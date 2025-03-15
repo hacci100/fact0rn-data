@@ -395,7 +395,7 @@ def main():
         
         # Check if we should update market data (every 5 minutes)
         current_time = int(time.time())
-        if current_time - last_market_update >= 300:  # 300 seconds = 5 minutes
+        if current_time - last_market_update >= 1500:  # 1500 seconds = 25 minutes
             print("Updating market data...")
             if save_market_data():
                 last_market_update = current_time
