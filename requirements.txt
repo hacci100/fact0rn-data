@@ -2,3 +2,4 @@ requests
 psycopg2-binary
 flask==2.2.5
 gunicorn==20.1.0
+flask-cors==4.0.0
