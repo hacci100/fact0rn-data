@@ -1,8 +1,9 @@
 from flask import Flask, jsonify, request
-from flask_cors import CORS  # Add this import
+from flask_cors import CORS
 import psycopg2
 import os
 import logging
+import datetime
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -76,7 +77,7 @@ def get_blocks():
         result = []
         for block in blocks:
             block_time = block[1]  # Unix timestamp
-            formatted_time = datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S')
+            formatted_time = datetime.datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S')
             
             result.append({
                 'block_number': block[0],
@@ -118,7 +119,7 @@ def get_block(block_number):
         
         # Format block data
         block_time = block[1]  # Unix timestamp
-        formatted_time = datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S')
+        formatted_time = datetime.datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S')
         
         result = {
             'block_number': block[0],
@@ -237,7 +238,7 @@ def get_all_data():
         result = []
         for block in blocks:
             block_time = block[1]  # Unix timestamp
-            formatted_time = datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S')
+            formatted_time = datetime.datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S')
             
             block_data = {
                 'block_number': block[0],
