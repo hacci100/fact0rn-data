@@ -8,7 +8,6 @@ import datetime
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
-
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -61,16 +60,53 @@ def get_blocks():
         if limit > 1000:  # Cap at 1000 for performance
             limit = 1000
             
+        # Get date range parameters (as timestamps)
+        start_timestamp = request.args.get('start_timestamp', type=int)
+        end_timestamp = request.args.get('end_timestamp', type=int)
+        
+        # Get block range parameters
+        start_block = request.args.get('start_block', type=int)
+        end_block = request.args.get('end_block', type=int)
+        
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("""
+        
+        # Build query based on parameters
+        query = """
             SELECT current_block_number, current_block_timestamp, 
                    previous_block_number, previous_block_timestamp,
                    block_time_interval_seconds, network_hashrate
             FROM block_data
-            ORDER BY current_block_number DESC
-            LIMIT %s
-        """, (limit,))
+        """
+        
+        params = []
+        where_clauses = []
+        
+        # Add timestamp range filter if provided
+        if start_timestamp:
+            where_clauses.append("current_block_timestamp >= %s")
+            params.append(start_timestamp)
+        if end_timestamp:
+            where_clauses.append("current_block_timestamp <= %s")
+            params.append(end_timestamp)
+            
+        # Add block range filter if provided
+        if start_block:
+            where_clauses.append("current_block_number >= %s")
+            params.append(start_block)
+        if end_block:
+            where_clauses.append("current_block_number <= %s")
+            params.append(end_block)
+        
+        # Add WHERE clause if we have any conditions
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+            
+        # Add ORDER BY and LIMIT
+        query += " ORDER BY current_block_number DESC LIMIT %s"
+        params.append(limit)
+        
+        cursor.execute(query, tuple(params))
         blocks = cursor.fetchall()
         
         result = []
