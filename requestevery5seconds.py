@@ -136,9 +136,26 @@ def get_money_supply():
 def get_current_price():
     """Get the current price of FACT0rn."""
     try:
-        price = fetch_api_data("getcurrentprice", is_ext=True)
-        if price:
-            return float(price)
+        price_data = fetch_api_data("getcurrentprice", is_ext=True)
+        if price_data:
+            # Handle both JSON and plain text responses
+            if isinstance(price_data, str) and price_data.startswith('{'):
+                # It's a JSON string
+                import json
+                price_json = json.loads(price_data)
+                if 'last_price_usd' in price_json:
+                    return float(price_json['last_price_usd'])
+                elif 'last_price_usdt' in price_json:
+                    return float(price_json['last_price_usdt'])
+            elif isinstance(price_data, dict):
+                # It's already a JSON object
+                if 'last_price_usd' in price_data:
+                    return float(price_data['last_price_usd'])
+                elif 'last_price_usdt' in price_data:
+                    return float(price_data['last_price_usdt'])
+            else:
+                # Try to parse as float directly
+                return float(price_data)
         return None
     except Exception as e:
         print(f"Error getting current price: {e}")
@@ -219,6 +236,7 @@ def save_emissions_data(block_number, unix_timestamp, formatted_time, block_rewa
 
 def save_market_data():
     """Save market data (price and difficulty) to the database."""
+    connection = None  # Initialize connection to avoid UnboundLocalError
     try:
         # Get current data
         current_time = datetime.now(timezone.utc)
