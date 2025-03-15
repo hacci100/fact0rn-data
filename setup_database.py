@@ -12,7 +12,7 @@ try:
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
 
-    # Create block_data table
+    # Create block_data table with moving average column
     print("Creating block_data table if it doesn't exist...")
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS block_data (
@@ -21,7 +21,8 @@ try:
         previous_block_number bigint,
         previous_block_timestamp bigint,
         block_time_interval_seconds integer,
-        network_hashrate numeric(18,2)
+        network_hashrate numeric(18,2),
+        moving_avg_100 numeric(10,2)
     );
     ''')
 

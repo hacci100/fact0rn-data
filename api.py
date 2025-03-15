@@ -55,81 +55,78 @@ def index():
 @app.route('/api/blocks', methods=['GET'])
 def get_blocks():
     try:
-        # Get limit parameter (default 100)
-        limit = request.args.get('limit', default=100, type=int)
-        if limit > 1000:  # Cap at 1000 for performance
-            limit = 1000
-            
-        # Get date range parameters (as timestamps)
-        start_timestamp = request.args.get('start_timestamp', type=int)
-        end_timestamp = request.args.get('end_timestamp', type=int)
-        
-        # Get block range parameters
+        # Get parameters from request
+        limit = request.args.get('limit', 50, type=int)
         start_block = request.args.get('start_block', type=int)
         end_block = request.args.get('end_block', type=int)
         
+        # Ensure reasonable limits for performance
+        if limit > 10000:  # Cap at 10000 for performance
+            limit = 10000
+        
+        # Connect to the database
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Build query based on parameters
+        # Construct the query to get block data with moving average from block_data table
         query = """
-            SELECT current_block_number, current_block_timestamp, 
-                   previous_block_number, previous_block_timestamp,
-                   block_time_interval_seconds, network_hashrate
+            SELECT 
+                current_block_number, 
+                block_time_interval_seconds,
+                current_block_timestamp,
+                moving_avg_100
             FROM block_data
         """
+        conditions = []
         
-        params = []
-        where_clauses = []
-        
-        # Add timestamp range filter if provided
-        if start_timestamp:
-            where_clauses.append("current_block_timestamp >= %s")
-            params.append(start_timestamp)
-        if end_timestamp:
-            where_clauses.append("current_block_timestamp <= %s")
-            params.append(end_timestamp)
-            
-        # Add block range filter if provided
+        # Add conditions based on parameters
         if start_block:
-            where_clauses.append("current_block_number >= %s")
-            params.append(start_block)
+            conditions.append(f"current_block_number >= {start_block}")
         if end_block:
-            where_clauses.append("current_block_number <= %s")
-            params.append(end_block)
+            conditions.append(f"current_block_number <= {end_block}")
         
-        # Add WHERE clause if we have any conditions
-        if where_clauses:
-            query += " WHERE " + " AND ".join(where_clauses)
+        # Add WHERE clause if there are conditions
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        # Add ORDER BY and LIMIT clauses
+        query += " ORDER BY current_block_number DESC"
+        if limit:
+            query += f" LIMIT {limit}"
+        
+        # Execute the query
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        
+        # Convert to list of dictionaries
+        blocks = []
+        for row in rows:
+            block_data = {
+                'block_number': row[0],
+                'block_time_seconds': row[1],
+                'timestamp': row[2],
+                'datetime': datetime.datetime.fromtimestamp(row[2]).strftime('%Y-%m-%d %H:%M:%S')
+            }
             
-        # Add ORDER BY and LIMIT
-        query += " ORDER BY current_block_number DESC LIMIT %s"
-        params.append(limit)
+            # Add moving average if it exists
+            if row[3] is not None:
+                block_data['moving_avg_100'] = float(row[3])
+                
+            blocks.append(block_data)
         
-        cursor.execute(query, tuple(params))
-        blocks = cursor.fetchall()
+        # Sort blocks by block_number (ascending)
+        blocks.sort(key=lambda x: x['block_number'])
         
-        result = []
-        for block in blocks:
-            block_time = block[1]  # Unix timestamp
-            formatted_time = datetime.datetime.fromtimestamp(block_time).strftime('%Y-%m-%d %H:%M:%S')
-            
-            result.append({
-                'block_number': block[0],
-                'timestamp': block_time,
-                'datetime': formatted_time,
-                'previous_block': block[2],
-                'previous_timestamp': block[3],
-                'block_time_seconds': block[4],
-                'network_hashrate': float(block[5]) if block[5] is not None else None
-            })
-        
-        cursor.close()
-        conn.close()
-        return jsonify(result)
+        # Return the result as JSON
+        return jsonify(blocks)
+    
     except Exception as e:
-        logger.error(f"Error in get_blocks: {e}")
-        return jsonify({'error': str(e)}), 500
+        # Log the error and return an error response
+        print(f"Error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
 
 @app.route('/api/blocks/<int:block_number>', methods=['GET'])
 def get_block(block_number):
