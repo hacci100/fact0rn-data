@@ -338,7 +338,7 @@ def get_daily_emissions():
         # Query to get emissions data grouped by day (in UTC time)
         query = """
             SELECT 
-                DATE_TRUNC('day', TO_TIMESTAMP(current_block_timestamp)) as day,
+                DATE_TRUNC('day', date_time) as day,
                 MAX(money_supply) - MIN(money_supply) as daily_emission,
                 MIN(money_supply) as start_supply,
                 MAX(money_supply) as end_supply,
@@ -346,8 +346,8 @@ def get_daily_emissions():
                 MIN(current_block_number) as first_block,
                 MAX(current_block_number) as last_block
             FROM emissions
-            WHERE current_block_timestamp >= EXTRACT(EPOCH FROM (CURRENT_DATE - INTERVAL '%s days'))
-            GROUP BY DATE_TRUNC('day', TO_TIMESTAMP(current_block_timestamp))
+            WHERE date_time >= CURRENT_DATE - INTERVAL '%s days'
+            GROUP BY DATE_TRUNC('day', date_time)
             ORDER BY day DESC
             LIMIT %s
         """
