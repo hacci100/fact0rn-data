@@ -48,7 +48,8 @@ def index():
             "GET /api/blocks": "Get recent blocks (with optional limit parameter)",
             "GET /api/blocks/<block_number>": "Get details for a specific block",
             "GET /api/stats": "Get blockchain statistics",
-            "GET /api/all-data": "Get all blockchain data (use with caution)"
+            "GET /api/all-data": "Get all blockchain data (use with caution)",
+            "GET /api/emissions/daily": "Get emissions data grouped by UTC day"
         }
     })
 
@@ -315,6 +316,70 @@ def get_all_data():
         return jsonify(result)
     except Exception as e:
         logger.error(f"Error in get_all_data: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/emissions/daily', methods=['GET'])
+def get_daily_emissions():
+    try:
+        # Get parameters from request
+        days = request.args.get('days', 7, type=int)  # Default to last 7 days
+        
+        # Connect to the database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Check if emissions table exists
+        cursor.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'emissions')")
+        table_exists = cursor.fetchone()[0]
+        
+        if not table_exists:
+            return jsonify({"error": "Emissions data is not available"}), 404
+        
+        # Query to get emissions data grouped by day (in UTC time)
+        query = """
+            SELECT 
+                DATE_TRUNC('day', TO_TIMESTAMP(current_block_timestamp)) as day,
+                MAX(money_supply) - MIN(money_supply) as daily_emission,
+                MIN(money_supply) as start_supply,
+                MAX(money_supply) as end_supply,
+                COUNT(*) as block_count,
+                MIN(current_block_number) as first_block,
+                MAX(current_block_number) as last_block
+            FROM emissions
+            WHERE current_block_timestamp >= EXTRACT(EPOCH FROM (CURRENT_DATE - INTERVAL '%s days'))
+            GROUP BY DATE_TRUNC('day', TO_TIMESTAMP(current_block_timestamp))
+            ORDER BY day DESC
+            LIMIT %s
+        """
+        
+        cursor.execute(query, (days, days))
+        rows = cursor.fetchall()
+        
+        if not rows:
+            return jsonify({"error": "No emissions data found for the specified period"}), 404
+        
+        # Format the results
+        emissions_data = []
+        for row in rows:
+            day, daily_emission, start_supply, end_supply, block_count, first_block, last_block = row
+            
+            emissions_data.append({
+                "date": day.strftime("%Y-%m-%d"),
+                "daily_emission": float(daily_emission) if daily_emission is not None else None,
+                "start_supply": float(start_supply) if start_supply is not None else None,
+                "end_supply": float(end_supply) if end_supply is not None else None,
+                "block_count": block_count,
+                "first_block": first_block,
+                "last_block": last_block
+            })
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify(emissions_data)
+    
+    except Exception as e:
+        logger.error(f"Error in get_daily_emissions: {e}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
