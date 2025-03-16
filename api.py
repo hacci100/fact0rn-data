@@ -68,15 +68,29 @@ def get_blocks():
         conn = get_db_connection()
         cursor = conn.cursor()
         
+        # First check if moving_avg_100 column exists
+        cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'block_data' AND column_name = 'moving_avg_100';")
+        has_moving_avg = cursor.fetchone() is not None
+        
         # Construct the query to get block data with moving average from block_data table
-        query = """
-            SELECT 
-                current_block_number, 
-                block_time_interval_seconds,
-                current_block_timestamp,
-                moving_avg_100
-            FROM block_data
-        """
+        if has_moving_avg:
+            query = """
+                SELECT 
+                    current_block_number, 
+                    block_time_interval_seconds,
+                    current_block_timestamp,
+                    moving_avg_100
+                FROM block_data
+            """
+        else:
+            query = """
+                SELECT 
+                    current_block_number, 
+                    block_time_interval_seconds,
+                    current_block_timestamp
+                FROM block_data
+            """
+        
         conditions = []
         
         # Add conditions based on parameters
@@ -108,8 +122,8 @@ def get_blocks():
                 'datetime': datetime.datetime.fromtimestamp(row[2]).strftime('%Y-%m-%d %H:%M:%S')
             }
             
-            # Add moving average if it exists
-            if row[3] is not None:
+            # Add moving average if it exists and the column exists
+            if has_moving_avg and len(row) > 3 and row[3] is not None:
                 block_data['moving_avg_100'] = float(row[3])
                 
             blocks.append(block_data)

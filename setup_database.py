@@ -21,8 +21,7 @@ try:
         previous_block_number bigint,
         previous_block_timestamp bigint,
         block_time_interval_seconds integer,
-        network_hashrate numeric(18,2),
-        moving_avg_100 numeric(10,2)
+        network_hashrate numeric(18,2)
     );
     ''')
 
@@ -50,8 +49,18 @@ try:
     );
     ''')
 
+    # Check if moving_avg_100 column already exists in block_data, add it if not
+    print("Checking if moving_avg_100 column exists in block_data...")
+    cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'block_data' AND column_name = 'moving_avg_100';")
+    if not cursor.fetchone():
+        print("Adding moving_avg_100 column to block_data...")
+        cursor.execute("ALTER TABLE block_data ADD COLUMN moving_avg_100 numeric(10,2);")
+        print("Column moving_avg_100 added successfully!")
+    else:
+        print("Column moving_avg_100 already exists.")
+
     conn.commit()
-    print('Tables created successfully')
+    print('Database setup completed successfully')
     cursor.close()
     conn.close()
 except Exception as e:
