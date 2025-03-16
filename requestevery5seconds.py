@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import psycopg2
 import os
 from urllib3 import response
+import sys
 
 # Base URLs
 BASE_URL = "https://explorer.fact0rn.io/api/"
@@ -116,12 +117,22 @@ def update_moving_average_100(connection, cursor, block_number, current_block_ti
         # If we have the current block's time interval, add it to the list
         # (it might not be in the database yet)
         block_times = []
-        if current_block_time is not None:
+        current_block_in_results = False
+        
+        # First check if current block is in results
+        for row in rows:
+            if row[0] == block_number and row[1] is not None:
+                current_block_in_results = True
+                block_times.append(row[1])
+                break
+                
+        # If not in results but we have the time, add it
+        if not current_block_in_results and current_block_time is not None:
             block_times.append(current_block_time)
             
         # Add remaining times from database
         for row in rows:
-            if row[0] != block_number:  # Avoid duplicate if current block is already in DB
+            if row[0] != block_number and row[1] is not None:  # Avoid duplicate and None values
                 block_times.append(row[1])
         
         # Only proceed if we have at least some blocks for meaningful calculation
@@ -361,9 +372,48 @@ def get_block_details(block_index):
     block_time = block_info.get("time")
     return block_hash, block_time, block_info
 
+def calculate_all_moving_averages():
+    """Calculate moving averages for all existing blocks in the database"""
+    try:
+        print("Starting calculation of moving averages for all blocks...")
+        connection = get_db_connection()
+        cursor = connection.cursor()
+        
+        # Get all blocks ordered by block number
+        cursor.execute("SELECT current_block_number FROM block_data ORDER BY current_block_number")
+        blocks = [row[0] for row in cursor.fetchall()]
+        
+        total_blocks = len(blocks)
+        print(f"Found {total_blocks} blocks to process")
+        
+        # Process each block
+        for i, block_number in enumerate(blocks):
+            update_moving_average_100(connection, cursor, block_number)
+            
+            # Commit every 100 blocks to avoid long transactions
+            if i % 100 == 0:
+                connection.commit()
+                print(f"Processed {i}/{total_blocks} blocks ({(i/total_blocks*100):.1f}%)")
+        
+        # Final commit
+        connection.commit()
+        print("Finished calculating moving averages for all blocks")
+        
+    except Exception as e:
+        print(f"Error calculating moving averages: {e}")
+    finally:
+        if connection:
+            cursor.close()
+            connection.close()
+
 def main():
     # Ensure blocks table exists before doing anything else
     ensure_blocks_table_exists()
+    
+    # Check if we should calculate moving averages for all blocks
+    if len(sys.argv) > 1 and sys.argv[1] == "--calculate-all-averages":
+        calculate_all_moving_averages()
+        return
     
     # Initial block count
     last_block_count = fetch_api_data("getblockcount")
