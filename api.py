@@ -80,7 +80,8 @@ def get_blocks():
             SELECT 
                 current_block_number, 
                 block_time_interval_seconds,
-                current_block_timestamp
+                current_block_timestamp,
+                network_hashrate
         """
         
         # Add moving average columns to the query if they exist
@@ -119,11 +120,12 @@ def get_blocks():
                 'block_number': row[0],
                 'block_time_seconds': row[1],
                 'timestamp': row[2],
-                'datetime': datetime.datetime.fromtimestamp(row[2]).strftime('%Y-%m-%d %H:%M:%S')
+                'datetime': datetime.datetime.fromtimestamp(row[2]).strftime('%Y-%m-%d %H:%M:%S'),
+                'network_hashrate': float(row[3]) if row[3] is not None else None
             }
             
             # Add moving averages if they exist
-            col_index = 3
+            col_index = 4
             if has_ma_100 and len(row) > col_index and row[col_index] is not None:
                 block_data['moving_avg_100'] = float(row[col_index])
                 col_index += 1
