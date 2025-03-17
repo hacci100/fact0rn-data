@@ -363,130 +363,218 @@ def main():
     
     last_block_count = int(last_block_count)
     print(f"Starting with block count: {last_block_count}")
+    
+    # Check for missed blocks
+    try:
+        connection = get_db_connection()
+        cursor = connection.cursor()
+        
+        # Get the latest block in our database
+        cursor.execute("SELECT MAX(current_block_number) FROM block_data")
+        db_latest_block = cursor.fetchone()[0]
+        
+        if db_latest_block is not None:
+            # If our database is behind, log it but continue with normal operation
+            # The sync API endpoint will handle catching up
+            if db_latest_block < last_block_count:
+                missed_blocks = last_block_count - db_latest_block
+                print(f"WARNING: Database is behind by {missed_blocks} blocks.")
+                print(f"Database latest block: {db_latest_block}")
+                print(f"Explorer latest block: {last_block_count}")
+                print("Use the /api/sync endpoint to sync missing blocks.")
+            else:
+                print(f"Database is up to date with latest block: {db_latest_block}")
+    except Exception as e:
+        print(f"Error checking for missed blocks: {e}")
+    finally:
+        if connection:
+            cursor.close()
+            connection.close()
+    
     print("Monitoring for block index changes every 5 seconds...")
     
     # Initialize data update timers
     last_market_update = 0
     last_money_supply_update = 0
     last_money_supply_value = None
-
+    
+    # Track consecutive failures
+    consecutive_failures = 0
+    max_consecutive_failures = 5
+    
     while True:
-        # Check current block count
-        current_block_count = fetch_api_data("getblockcount")
-        if current_block_count is None:
-            print("Failed to get block count. Retrying in 5 seconds...")
-            time.sleep(5)
-            continue
-
-        # Check if block count has changed
-        if current_block_count != last_block_count:
-            print(f"\nBlock index changed from {last_block_count} to {current_block_count}")
-            
-            # Fetch details for the new latest block
-            latest_block_hash, latest_block_time, block_info = get_block_details(current_block_count)
-            if latest_block_time is None:
-                print("Failed to fetch latest block details. Continuing...")
-                last_block_count = current_block_count
+        try:
+            # Check current block count
+            current_block_count = fetch_api_data("getblockcount")
+            if current_block_count is None:
+                print("Failed to get block count. Retrying in 5 seconds...")
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    print(f"WARNING: {consecutive_failures} consecutive failures. Continuing to retry...")
                 time.sleep(5)
                 continue
+            
+            # Reset failure counter on success
+            consecutive_failures = 0
+            
+            # Convert to integer
+            current_block_count = int(current_block_count)
+            
+            # Check if block count has changed
+            if current_block_count != last_block_count:
+                print(f"\nBlock index changed from {last_block_count} to {current_block_count}")
+                
+                # Check if we skipped any blocks
+                if current_block_count > last_block_count + 1:
+                    missed_blocks = current_block_count - last_block_count - 1
+                    print(f"WARNING: Missed {missed_blocks} blocks between {last_block_count} and {current_block_count}")
+                    
+                    # Process each missed block
+                    for missed_block in range(last_block_count + 1, current_block_count):
+                        print(f"Processing missed block {missed_block}...")
+                        
+                        # Fetch details for the missed block
+                        missed_block_hash, missed_block_time, missed_block_info = get_block_details(missed_block)
+                        if missed_block_time is None:
+                            print(f"Failed to fetch details for missed block {missed_block}. Skipping...")
+                            continue
+                        
+                        # Fetch details for the previous block
+                        prev_block_index = missed_block - 1
+                        prev_block_hash, prev_block_time, _ = get_block_details(prev_block_index)
+                        if prev_block_time is None:
+                            print(f"Failed to fetch previous block details for missed block {missed_block}. Skipping...")
+                            continue
+                        
+                        # Calculate time difference
+                        time_difference = missed_block_time - prev_block_time
+                        formatted_block_time = format_unix_time(missed_block_time)
+                        
+                        # Save the missed block data to the database
+                        save_to_database(
+                            missed_block,
+                            missed_block_hash,
+                            missed_block_time,
+                            formatted_block_time,
+                            time_difference
+                        )
+                        
+                        # Get block reward from coinbase transaction
+                        block_reward = get_block_reward(missed_block_info)
+                        
+                        # Save emissions data for the missed block
+                        save_emissions_data(missed_block, missed_block_time, formatted_block_time, block_reward)
+                
+                # Fetch details for the new latest block
+                latest_block_hash, latest_block_time, block_info = get_block_details(current_block_count)
+                if latest_block_time is None:
+                    print("Failed to fetch latest block details. Continuing...")
+                    last_block_count = current_block_count
+                    time.sleep(5)
+                    continue
 
-            # Fetch details for the previous block
-            previous_block_index = current_block_count - 1
-            previous_block_hash, previous_block_time, _ = get_block_details(previous_block_index)
-            if previous_block_time is None:
-                print("Failed to fetch previous block details. Continuing...")
+                # Fetch details for the previous block
+                previous_block_index = current_block_count - 1
+                previous_block_hash, previous_block_time, _ = get_block_details(previous_block_index)
+                if previous_block_time is None:
+                    print("Failed to fetch previous block details. Continuing...")
+                    last_block_count = current_block_count
+                    time.sleep(5)
+                    continue
+
+                # Calculate time difference
+                time_difference = latest_block_time - previous_block_time
+                formatted_block_time = format_unix_time(latest_block_time)
+
+                # Save the latest block data to the database
+                save_to_database(
+                    current_block_count,
+                    latest_block_hash,
+                    latest_block_time,
+                    formatted_block_time,
+                    time_difference
+                )
+                
+                # Get block reward from coinbase transaction
+                block_reward = get_block_reward(block_info)
+                if block_reward is not None:
+                    print(f"Block Reward: {block_reward}")
+                
+                # Check if we should update money supply data (every 60 seconds)
+                current_time = int(time.time())
+                if current_time - last_money_supply_update >= 60:  # 60 seconds = 1 minute
+                    print("Updating money supply data...")
+                    money_supply = get_money_supply()
+                    if money_supply is not None:
+                        last_money_supply_value = money_supply
+                        last_money_supply_update = current_time
+                        print(f"Money Supply: {money_supply}")
+            
+                # Save emissions data with the latest money supply value
+                try:
+                    connection = get_db_connection()
+                    cursor = connection.cursor()
+                    
+                    # Check if we already have emissions data for this block
+                    cursor.execute("SELECT 1 FROM emissions WHERE current_block_number = %s", (current_block_count,))
+                    if not cursor.fetchone():
+                        # Insert emissions data
+                        cursor.execute("""
+                            INSERT INTO emissions (current_block_number, unix_timestamp, date_time, money_supply, block_reward)
+                            VALUES (%s, %s, %s, %s, %s)
+                            ON CONFLICT (current_block_number) DO NOTHING;
+                        """, (current_block_count, latest_block_time, formatted_block_time, last_money_supply_value, block_reward))
+                        
+                        connection.commit()
+                        print(f"Emissions data for block {current_block_count} saved to database.")
+                    else:
+                        print(f"Emissions data for block {current_block_count} already exists.")
+                except Exception as e:
+                    print(f"Error saving emissions data: {e}")
+                finally:
+                    if connection:
+                        cursor.close()
+                        connection.close()
+
+                # Fetch and display hashrate
+                current_hashrate = fetch_current_hashrate()
+                if current_hashrate is not None:
+                    print(f"Current Network Hashrate: {current_hashrate} hashes per second")
+
+                # Print details
+                print(f"Latest Block (Index {current_block_count}) Time (Unix): {latest_block_time}")
+                print(f"Previous Block (Index {previous_block_index}) Time (Unix): {previous_block_time}")
+                print(f"Hash of block {current_block_count}: {latest_block_hash}")
+                print(f"Latest block completed: {formatted_block_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+                print(f"Previous block completed: {format_unix_time(previous_block_time).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+                print(f"Time difference between blocks: {time_difference} seconds")
+
+                # Update last_block_count to the new current_block_count
                 last_block_count = current_block_count
-                time.sleep(5)
-                continue
-
-            # Calculate time difference
-            time_difference = latest_block_time - previous_block_time
-            formatted_block_time = format_unix_time(latest_block_time)
-
-            # Save the latest block data to the database
-            save_to_database(
-                current_block_count,
-                latest_block_hash,
-                latest_block_time,
-                formatted_block_time,
-                time_difference
-            )
-            
-            # Get block reward from coinbase transaction
-            block_reward = get_block_reward(block_info)
-            if block_reward is not None:
-                print(f"Block Reward: {block_reward}")
-            
-            # Check if we should update money supply data (every 60 seconds)
+        
+        except Exception as e:
+            print(f"Unexpected error in main loop: {e}")
+            print("Waiting 30 seconds before retrying...")
+            time.sleep(30)
+        finally:
+            # Check if we should update market data (every 5 minutes)
             current_time = int(time.time())
-            if current_time - last_money_supply_update >= 60:  # 60 seconds = 1 minute
-                print("Updating money supply data...")
+            if current_time - last_market_update >= 1500:  # 1500 seconds = 25 minutes
+                print("Updating market data...")
+                if save_market_data():
+                    last_market_update = current_time
+                    
+            # Check if we should update money supply outside of block updates (every 60 seconds)
+            if current_time - last_money_supply_update >= 60:
+                print("Updating money supply data (outside block update)...")
                 money_supply = get_money_supply()
                 if money_supply is not None:
                     last_money_supply_value = money_supply
                     last_money_supply_update = current_time
-                    print(f"Money Supply: {money_supply}")
-            
-            # Save emissions data with the latest money supply value
-            try:
-                connection = get_db_connection()
-                cursor = connection.cursor()
-                
-                # Check if we already have emissions data for this block
-                cursor.execute("SELECT 1 FROM emissions WHERE current_block_number = %s", (current_block_count,))
-                if not cursor.fetchone():
-                    # Insert emissions data
-                    cursor.execute("""
-                        INSERT INTO emissions (current_block_number, unix_timestamp, date_time, money_supply, block_reward)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (current_block_number) DO NOTHING;
-                    """, (current_block_count, latest_block_time, formatted_block_time, last_money_supply_value, block_reward))
-                    
-                    connection.commit()
-                    print(f"Emissions data for block {current_block_count} saved to database.")
-                else:
-                    print(f"Emissions data for block {current_block_count} already exists.")
-            except Exception as e:
-                print(f"Error saving emissions data: {e}")
-            finally:
-                if connection:
-                    cursor.close()
-                    connection.close()
+                    print(f"Money Supply (outside block update): {money_supply}")
 
-            # Fetch and display hashrate
-            current_hashrate = fetch_current_hashrate()
-            if current_hashrate is not None:
-                print(f"Current Network Hashrate: {current_hashrate} hashes per second")
-
-            # Print details
-            print(f"Latest Block (Index {current_block_count}) Time (Unix): {latest_block_time}")
-            print(f"Previous Block (Index {previous_block_index}) Time (Unix): {previous_block_time}")
-            print(f"Hash of block {current_block_count}: {latest_block_hash}")
-            print(f"Latest block completed: {formatted_block_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-            print(f"Previous block completed: {format_unix_time(previous_block_time).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-            print(f"Time difference between blocks: {time_difference} seconds")
-
-            # Update last_block_count to the new current_block_count
-            last_block_count = current_block_count
-        
-        # Check if we should update market data (every 5 minutes)
-        current_time = int(time.time())
-        if current_time - last_market_update >= 1500:  # 1500 seconds = 25 minutes
-            print("Updating market data...")
-            if save_market_data():
-                last_market_update = current_time
-                
-        # Check if we should update money supply outside of block updates (every 60 seconds)
-        if current_time - last_money_supply_update >= 60:
-            print("Updating money supply data (outside block update)...")
-            money_supply = get_money_supply()
-            if money_supply is not None:
-                last_money_supply_value = money_supply
-                last_money_supply_update = current_time
-                print(f"Money Supply (outside block update): {money_supply}")
-
-        # Wait 5 seconds before checking again
-        time.sleep(5)
+            # Wait 5 seconds before checking again
+            time.sleep(5)
 
 if __name__ == "__main__":
     try:
