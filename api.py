@@ -51,7 +51,8 @@ def index():
             "GET /api/stats": "Get blockchain statistics",
             "GET /api/all-data": "Get all blockchain data (use with caution)",
             "GET /api/emissions/daily": "Get emissions data grouped by UTC day",
-            "GET /api/sync": "Sync missing blocks from the Fact0rn explorer"
+            "GET /api/sync": "Sync missing blocks from the Fact0rn explorer",
+            "GET /api/fix-moving-averages": "Fix missing or incorrect moving averages in the database"
         }
     })
 
@@ -488,102 +489,204 @@ def get_daily_emissions():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/sync', methods=['GET'])
-def sync_missing_blocks():
+def sync_blocks():
+    """
+    Sync missing blocks from the Fact0rn explorer.
+    """
     try:
-        # Connect to the database
+        # Connect to database
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Get the latest block number from our database
+        # Get the latest block count from the explorer
+        response = requests.get('https://explorer.fact0rn.io/api/getblockcount')
+        latest_block = int(response.text.strip())
+        
+        # Get the latest block in our database
         cursor.execute("SELECT MAX(current_block_number) FROM block_data")
-        db_latest_block = cursor.fetchone()[0]
+        result = cursor.fetchone()
+        latest_local_block = result[0] if result and result[0] else 0
         
-        if db_latest_block is None:
-            return jsonify({"error": "No blocks found in database"}), 500
-        
-        # Get the latest block from the Fact0rn explorer
-        response = requests.get("https://explorer.fact0rn.io/api/getblockcount")
-        if response.status_code != 200:
-            return jsonify({"error": "Failed to get block count from explorer"}), 500
-        
-        explorer_latest_block = int(response.text.strip())
-        
-        if db_latest_block >= explorer_latest_block:
-            return jsonify({"message": "Database is up to date", "latest_block": db_latest_block})
-        
-        # Calculate missing blocks
-        missing_blocks = explorer_latest_block - db_latest_block
-        blocks_to_sync = min(missing_blocks, 100)  # Limit to 100 blocks per request to avoid timeout
-        
-        synced_blocks = []
-        
-        # Import necessary functions from requestevery5seconds.py
-        from requestevery5seconds import get_block_details, format_unix_time, fetch_current_hashrate, update_moving_averages
-        
-        # Sync missing blocks
-        for block_index in range(db_latest_block + 1, db_latest_block + blocks_to_sync + 1):
-            # Get block details
-            block_hash, block_time, block_info = get_block_details(block_index)
-            if block_time is None:
-                continue
-                
-            # Get previous block details
-            prev_block_index = block_index - 1
-            prev_block_hash, prev_block_time, _ = get_block_details(prev_block_index)
-            if prev_block_time is None:
-                continue
-                
-            # Calculate time difference
-            time_difference = block_time - prev_block_time
-            formatted_time = format_unix_time(block_time)
-            
-            # Get current hashrate
-            current_hashrate = fetch_current_hashrate()
-            
-            # Insert into block_data table
-            cursor.execute("""
-                INSERT INTO block_data (
-                    current_block_number, 
-                    current_block_timestamp, 
-                    previous_block_number,
-                    previous_block_timestamp,
-                    block_time_interval_seconds,
-                    network_hashrate
-                )
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (current_block_number) DO NOTHING;
-            """, (
-                block_index, 
-                block_time, 
-                prev_block_index,
-                prev_block_time,
-                time_difference,
-                current_hashrate
-            ))
-            
-            # Update moving averages
-            update_moving_averages(conn, cursor, block_index)
-            
-            synced_blocks.append(block_index)
-            
-        conn.commit()
-        
-        return jsonify({
-            "message": f"Synced {len(synced_blocks)} blocks",
-            "synced_blocks": synced_blocks,
-            "remaining_blocks": missing_blocks - len(synced_blocks),
-            "db_latest_block": db_latest_block + len(synced_blocks),
-            "explorer_latest_block": explorer_latest_block
-        })
-    
-    except Exception as e:
-        # Log the error and return an error response
-        print(f"Error syncing blocks: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-    finally:
-        if conn:
+        # Check if we're missing any blocks
+        if latest_block <= latest_local_block:
             cursor.close()
             conn.close()
+            return jsonify({
+                'status': 'success',
+                'message': 'No blocks to sync',
+                'latest_block': latest_block,
+                'latest_local_block': latest_local_block
+            })
+        
+        # Calculate blocks to sync (up to 100 at a time to avoid timeouts)
+        blocks_to_sync = range(latest_local_block + 1, min(latest_block + 1, latest_local_block + 101))
+        blocks_synced = []
+        failures = []
+        
+        for block_index in blocks_to_sync:
+            try:
+                # Get block data
+                block_hash, block_time, block_info = get_block_details(block_index)
+                if block_hash is None or block_time is None:
+                    print(f"Failed to fetch block {block_index}")
+                    failures.append(block_index)
+                    continue
+                
+                # Get previous block details
+                prev_block_index = block_index - 1
+                prev_block_hash, prev_block_time, _ = get_block_details(prev_block_index)
+                if prev_block_hash is None or prev_block_time is None:
+                    print(f"Failed to fetch previous block {prev_block_index}")
+                    failures.append(block_index)
+                    continue
+                
+                # Calculate time difference
+                time_difference = block_time - prev_block_time
+                formatted_block_time = format_unix_time(block_time)
+                
+                # Get current hashrate
+                current_hashrate = fetch_current_hashrate()
+                
+                # Insert into block_data table
+                try:
+                    cursor.execute("""
+                        INSERT INTO block_data (
+                            current_block_number, 
+                            current_block_timestamp, 
+                            previous_block_number,
+                            previous_block_timestamp,
+                            block_time_interval_seconds,
+                            network_hashrate
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (current_block_number) DO UPDATE SET
+                            current_block_timestamp = EXCLUDED.current_block_timestamp,
+                            previous_block_number = EXCLUDED.previous_block_number,
+                            previous_block_timestamp = EXCLUDED.previous_block_timestamp,
+                            block_time_interval_seconds = EXCLUDED.block_time_interval_seconds,
+                            network_hashrate = EXCLUDED.network_hashrate;
+                    """, (
+                        block_index, 
+                        block_time, 
+                        prev_block_index,
+                        prev_block_time,
+                        time_difference,
+                        current_hashrate
+                    ))
+                    
+                    conn.commit()
+                    
+                    # Update moving averages
+                    update_moving_averages(conn, cursor, block_index)
+                    
+                    # Get block reward from coinbase transaction
+                    block_reward = get_block_reward(block_info)
+                    
+                    # Save emissions data for the block
+                    save_emissions_data(block_index, block_time, formatted_block_time, block_reward)
+                    
+                    blocks_synced.append(block_index)
+                    print(f"Successfully synced block {block_index}")
+                except Exception as e:
+                    print(f"Database error for block {block_index}: {e}")
+                    conn.rollback()
+                    failures.append(block_index)
+            except Exception as e:
+                print(f"Error syncing block {block_index}: {e}")
+                failures.append(block_index)
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'status': 'success',
+            'message': f'Synced {len(blocks_synced)} blocks',
+            'blocks_synced': blocks_synced,
+            'failures': failures,
+            'latest_block': latest_block,
+            'latest_local_block': latest_local_block + len(blocks_synced)
+        })
+    except Exception as e:
+        logger.error(f"Error in sync_blocks: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+@app.route('/api/fix-moving-averages', methods=['GET'])
+def fix_moving_averages():
+    """
+    Fix missing or incorrect moving averages in the database.
+    Optional query parameters:
+    - limit: Maximum number of blocks to process (default 100)
+    - force: Set to 'true' to recalculate all moving averages, not just missing ones
+    """
+    try:
+        # Get query parameters
+        limit = request.args.get('limit', default=100, type=int)
+        force = request.args.get('force', default='false', type=str).lower() == 'true'
+        
+        # Connect to database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        if force:
+            # Get all blocks that need their moving averages recalculated
+            cursor.execute("""
+                SELECT current_block_number 
+                FROM block_data 
+                ORDER BY current_block_number
+                LIMIT %s
+            """, (limit,))
+        else:
+            # Get only blocks with missing moving averages
+            cursor.execute("""
+                SELECT current_block_number 
+                FROM block_data 
+                WHERE moving_avg_100 IS NULL OR moving_avg_672 IS NULL
+                ORDER BY current_block_number
+                LIMIT %s
+            """, (limit,))
+        
+        blocks_to_fix = [row[0] for row in cursor.fetchall()]
+        
+        if not blocks_to_fix:
+            cursor.close()
+            conn.close()
+            return jsonify({
+                'status': 'success',
+                'message': 'No blocks need moving averages fixed',
+                'blocks_fixed': []
+            })
+        
+        # Process each block
+        fixed_blocks = []
+        failures = []
+        
+        for block_number in blocks_to_fix:
+            try:
+                print(f"Fixing moving averages for block {block_number}...")
+                update_moving_averages(conn, cursor, block_number)
+                fixed_blocks.append(block_number)
+            except Exception as e:
+                print(f"Error fixing moving averages for block {block_number}: {e}")
+                failures.append(block_number)
+        
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'status': 'success',
+            'message': f'Fixed moving averages for {len(fixed_blocks)} blocks',
+            'blocks_fixed': fixed_blocks,
+            'failures': failures
+        })
+    except Exception as e:
+        logger.error(f"Error in fix_moving_averages: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 if __name__ == '__main__':
     # Run the Flask app

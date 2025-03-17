@@ -21,59 +21,71 @@ MOVING_AVERAGES = [100, 672]  # Only using MA-100 and MA-672
 
 # Custom update_moving_averages function that uses the correct column names
 def update_moving_averages(connection, cursor, block_number):
+    """Update moving averages for the given block number."""
     try:
-        # Get all available block time intervals
+        # Calculate 100-block moving average
         cursor.execute("""
-            SELECT current_block_number, block_time_interval_seconds 
-            FROM block_data 
-            WHERE block_time_interval_seconds IS NOT NULL
-            ORDER BY current_block_number DESC
-            LIMIT 1000
-        """)
-        results = cursor.fetchall()
+            SELECT AVG(block_time_interval_seconds)
+            FROM (
+                SELECT block_time_interval_seconds
+                FROM block_data
+                WHERE current_block_number <= %s AND block_time_interval_seconds IS NOT NULL
+                ORDER BY current_block_number DESC
+                LIMIT 100
+            ) AS recent_blocks
+        """, (block_number,))
         
-        # Check if we have any results
-        if not results:
-            print(f"No block data found for calculating moving averages.")
-            return
+        result = cursor.fetchone()
+        avg_100 = result[0] if result and result[0] is not None else None
+        
+        # Calculate 672-block moving average
+        cursor.execute("""
+            SELECT AVG(block_time_interval_seconds)
+            FROM (
+                SELECT block_time_interval_seconds
+                FROM block_data
+                WHERE current_block_number <= %s AND block_time_interval_seconds IS NOT NULL
+                ORDER BY current_block_number DESC
+                LIMIT 672
+            ) AS recent_blocks
+        """, (block_number,))
+        
+        result = cursor.fetchone()
+        avg_672 = result[0] if result and result[0] is not None else None
+        
+        # Only update if we have valid averages
+        if avg_100 is not None or avg_672 is not None:
+            # Build the update query dynamically based on which averages we have
+            update_parts = []
+            params = []
             
-        # Extract block time intervals
-        time_intervals = [row[1] for row in results]
-        
-        updates = {}
-        
-        for period in MOVING_AVERAGES:
-            if len(time_intervals) < period:
-                print(f"Not enough data for {period}-block moving average. Need {period}, have {len(time_intervals)}.")
-                continue  # Skip if not enough data
+            if avg_100 is not None:
+                update_parts.append("moving_avg_100 = CAST(%s AS NUMERIC(20,8))")
+                params.append(avg_100)
+            
+            if avg_672 is not None:
+                update_parts.append("moving_avg_672 = CAST(%s AS NUMERIC(20,8))")
+                params.append(avg_672)
+            
+            if update_parts:
+                query = f"""
+                    UPDATE block_data
+                    SET {", ".join(update_parts)}
+                    WHERE current_block_number = %s
+                """
+                params.append(block_number)
                 
-            recent_intervals = time_intervals[:period]
-            avg = sum(recent_intervals) / period
-            
-            # Check if the value is too large for the database column
-            if avg >= 10**8:
-                print(f"Warning: Moving average for {period} blocks is too large ({avg}). Scaling down.")
-                avg = 99999999.99  # Set to maximum allowed value
+                cursor.execute(query, params)
+                connection.commit()
                 
-            updates[f'moving_avg_{period}'] = round(avg, 2)
-        
-        if updates:
-            set_clause = ", ".join([f"{col} = %s" for col in updates.keys()])
-            query = f"""
-                UPDATE block_data 
-                SET {set_clause} 
-                WHERE current_block_number = %s
-            """
-            cursor.execute(query, (*updates.values(), block_number))
-            
-            print(f"Updated averages for block {block_number}:")
-            for period, avg in updates.items():
-                print(f" - {period.replace('moving_avg_','')}-block MA: {avg}s")
+                # Log the update
+                avg_100_str = f"{avg_100:.2f}" if avg_100 is not None else "N/A"
+                avg_672_str = f"{avg_672:.2f}" if avg_672 is not None else "N/A"
+                print(f"Updated moving averages for block {block_number}: 100-block avg = {avg_100_str}, 672-block avg = {avg_672_str}")
         else:
-            print(f"No moving averages updated for block {block_number}.")
-                
+            print(f"Not enough blocks to calculate moving averages for block {block_number}")
     except Exception as e:
-        print(f"Error updating moving averages: {e}")
+        print(f"Error updating moving averages for block {block_number}: {e}")
         connection.rollback()
 
 def sync_missing_blocks(start_block, end_block):

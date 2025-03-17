@@ -56,28 +56,15 @@ def format_unix_time(unix_time):
     return datetime.fromtimestamp(unix_time, timezone.utc)
 
 def save_to_database(block_index, block_hash, unix_timestamp, formatted_time, time_difference):
-    """Save block data to PostgreSQL database."""
     try:
+        # Connect to database
         connection = get_db_connection()
         cursor = connection.cursor()
         
-        # Fetch current hashrate
+        # Get current hashrate
         current_hashrate = fetch_current_hashrate()
         
-        # Get previous block number (current - 1)
-        previous_block_number = block_index - 1
-        
-        # Fetch previous block timestamp if available
-        previous_block_timestamp = None
-        try:
-            cursor.execute("SELECT current_block_timestamp FROM block_data WHERE current_block_number = %s", (previous_block_number,))
-            result = cursor.fetchone()
-            if result:
-                previous_block_timestamp = result[0]
-        except Exception as e:
-            print(f"Error fetching previous block timestamp: {e}")
-        
-        # Insert into block_data table with correct column names
+        # Insert block data into the database
         cursor.execute("""
             INSERT INTO block_data (
                 current_block_number, 
@@ -85,72 +72,138 @@ def save_to_database(block_index, block_hash, unix_timestamp, formatted_time, ti
                 previous_block_number,
                 previous_block_timestamp,
                 block_time_interval_seconds,
-                moving_avg_100,
-                moving_avg_672,
                 network_hashrate
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (current_block_number) DO NOTHING;
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (current_block_number) DO UPDATE SET
+                current_block_timestamp = EXCLUDED.current_block_timestamp,
+                previous_block_number = EXCLUDED.previous_block_number,
+                previous_block_timestamp = EXCLUDED.previous_block_timestamp,
+                block_time_interval_seconds = EXCLUDED.block_time_interval_seconds,
+                network_hashrate = EXCLUDED.network_hashrate;
         """, (
             block_index, 
             unix_timestamp, 
-            previous_block_number,
-            previous_block_timestamp,
+            block_index - 1,
+            unix_timestamp - time_difference,
             time_difference,
-            None, None,
             current_hashrate
         ))
         
+        connection.commit()
+        
+        # Update moving averages
         update_moving_averages(connection, cursor, block_index)
         
-        connection.commit()
-        print(f"Data for block {block_index} saved to database.")
-    except psycopg2.Error as e:
-        print(f"Database error: {e}")
-    finally:
-        if connection:
-            cursor.close()
-            connection.close()
-
-MOVING_AVERAGES = [100, 672]  # Only using MA-100 and MA-672
+        cursor.close()
+        connection.close()
+        return True
+    except Exception as e:
+        print(f"Error saving to database: {e}")
+        return False
 
 def update_moving_averages(connection, cursor, block_number):
+    """Update moving averages for the given block number."""
     try:
-        # Get all available block times
+        # Calculate 100-block moving average
         cursor.execute("""
-            SELECT current_block_number, current_block_timestamp 
-            FROM block_data 
-            WHERE current_block_timestamp IS NOT NULL
-            ORDER BY current_block_number DESC
-        """)
-        block_times = [row[1] for row in cursor.fetchall()]
+            SELECT AVG(block_time_interval_seconds)
+            FROM (
+                SELECT block_time_interval_seconds
+                FROM block_data
+                WHERE current_block_number <= %s AND block_time_interval_seconds IS NOT NULL
+                ORDER BY current_block_number DESC
+                LIMIT 100
+            ) AS recent_blocks
+        """, (block_number,))
         
-        updates = {}
+        result = cursor.fetchone()
+        avg_100 = result[0] if result and result[0] is not None else None
         
-        for period in MOVING_AVERAGES:
-            if len(block_times) < period:
-                continue  # Skip if not enough data
-                
-            recent_blocks = block_times[:period]
-            avg = sum(recent_blocks) / period
-            updates[f'moving_avg_{period}'] = round(avg, 2)
+        # Calculate 672-block moving average
+        cursor.execute("""
+            SELECT AVG(block_time_interval_seconds)
+            FROM (
+                SELECT block_time_interval_seconds
+                FROM block_data
+                WHERE current_block_number <= %s AND block_time_interval_seconds IS NOT NULL
+                ORDER BY current_block_number DESC
+                LIMIT 672
+            ) AS recent_blocks
+        """, (block_number,))
         
-        if updates:
-            set_clause = ", ".join([f"{col} = %s" for col in updates.keys()])
-            query = f"""
-                UPDATE block_data 
-                SET {set_clause} 
-                WHERE current_block_number = %s
-            """
-            cursor.execute(query, (*updates.values(), block_number))
+        result = cursor.fetchone()
+        avg_672 = result[0] if result and result[0] is not None else None
+        
+        # Only update if we have valid averages
+        if avg_100 is not None or avg_672 is not None:
+            # Build the update query dynamically based on which averages we have
+            update_parts = []
+            params = []
             
-            print(f"Updated averages for block {block_number}:")
-            for period, avg in updates.items():
-                print(f" - {period.replace('moving_avg_','')}-block MA: {avg}s")
+            if avg_100 is not None:
+                update_parts.append("moving_avg_100 = CAST(%s AS NUMERIC(20,8))")
+                params.append(avg_100)
+            
+            if avg_672 is not None:
+                update_parts.append("moving_avg_672 = CAST(%s AS NUMERIC(20,8))")
+                params.append(avg_672)
+            
+            if update_parts:
+                query = f"""
+                    UPDATE block_data
+                    SET {", ".join(update_parts)}
+                    WHERE current_block_number = %s
+                """
+                params.append(block_number)
                 
+                cursor.execute(query, params)
+                connection.commit()
+                
+                # Log the update
+                avg_100_str = f"{avg_100:.2f}" if avg_100 is not None else "N/A"
+                avg_672_str = f"{avg_672:.2f}" if avg_672 is not None else "N/A"
+                print(f"Updated moving averages for block {block_number}: 100-block avg = {avg_100_str}, 672-block avg = {avg_672_str}")
+        else:
+            print(f"Not enough blocks to calculate moving averages for block {block_number}")
     except Exception as e:
-        print(f"Error updating moving averages: {e}")
+        print(f"Error updating moving averages for block {block_number}: {e}")
         connection.rollback()
+
+def check_and_fix_missing_averages(limit=100):
+    """Check for blocks with missing moving averages and fix them."""
+    try:
+        # Connect to database
+        connection = get_db_connection()
+        cursor = connection.cursor()
+        
+        # Find blocks with missing moving averages
+        cursor.execute("""
+            SELECT current_block_number 
+            FROM block_data 
+            WHERE moving_avg_100 IS NULL OR moving_avg_672 IS NULL
+            ORDER BY current_block_number
+            LIMIT %s
+        """, (limit,))
+        
+        missing_blocks = [row[0] for row in cursor.fetchall()]
+        
+        if missing_blocks:
+            print(f"Found {len(missing_blocks)} blocks with missing moving averages")
+            
+            # Process each block
+            for block_number in missing_blocks:
+                print(f"Fixing moving averages for block {block_number}...")
+                update_moving_averages(connection, cursor, block_number)
+        else:
+            print("No blocks with missing moving averages found")
+        
+        cursor.close()
+        connection.close()
+        return True
+    except Exception as e:
+        print(f"Error checking for missing averages: {e}")
+        return False
 
 def fetch_current_hashrate():
     """Fetch the current network hashrate from the Fact0rn API."""
@@ -337,8 +390,6 @@ def ensure_blocks_table_exists():
                 previous_block_number INTEGER,
                 previous_block_timestamp NUMERIC,
                 block_time_interval_seconds NUMERIC,
-                moving_avg_100 NUMERIC,
-                moving_avg_672 NUMERIC,
                 network_hashrate NUMERIC
             );
         """)
@@ -367,233 +418,101 @@ def get_block_details(block_index):
     block_time = block_info.get("time")
     return block_hash, block_time, block_info
 
-def main():
-    # Ensure blocks table exists before doing anything else
+def process_block(block_number):
+    """Process a single block by fetching details and saving to database."""
+    # Get block details
+    block_hash, unix_timestamp, block_info = get_block_details(block_number)
+    if unix_timestamp is None:
+        raise Exception(f"Failed to get details for block {block_number}")
+        
+    # Get previous block for time difference calculation
+    prev_block_hash, prev_unix_timestamp, _ = get_block_details(block_number - 1)
+    if prev_unix_timestamp is None:
+        raise Exception(f"Failed to get details for previous block {block_number - 1}")
+    
+    # Calculate time difference
+    time_difference = unix_timestamp - prev_unix_timestamp
+    formatted_time = format_unix_time(unix_timestamp)
+    
+    # Save to database
+    success = save_to_database(block_number, block_hash, unix_timestamp, formatted_time, time_difference)
+    
+    if success:
+        # Get block reward from coinbase transaction
+        block_reward = get_block_reward(block_info)
+        
+        # Save emissions data
+        save_emissions_data(block_number, unix_timestamp, formatted_time, block_reward)
+    
+    return success
+
+def setup_database():
     ensure_blocks_table_exists()
+
+if __name__ == "__main__":
+    consecutive_failures = 0
+    max_consecutive_failures = 5
+    last_processed_block = None
     
-    # Initial block count
-    last_block_count = fetch_api_data("getblockcount")
-    if last_block_count is None:
-        print("Failed to get initial block count, exiting.")
-        return
+    print(f"Starting Fact0rn block data collection...")
+    try:
+        # Set up database tables if needed
+        setup_database()
+    except Exception as e:
+        print(f"Error setting up database: {e}")
     
-    last_block_count = int(last_block_count)
-    print(f"Starting with block count: {last_block_count}")
-    
-    # Check for missed blocks
+    # Try to get the last processed block from the database
     try:
         connection = get_db_connection()
         cursor = connection.cursor()
         
-        # Get the latest block in our database
         cursor.execute("SELECT MAX(current_block_number) FROM block_data")
-        db_latest_block = cursor.fetchone()[0]
+        result = cursor.fetchone()
+        if result and result[0]:
+            last_processed_block = result[0]
+            print(f"Last processed block: {last_processed_block}")
         
-        if db_latest_block is not None:
-            # If our database is behind, log it but continue with normal operation
-            # The sync API endpoint will handle catching up
-            if db_latest_block < last_block_count:
-                missed_blocks = last_block_count - db_latest_block
-                print(f"WARNING: Database is behind by {missed_blocks} blocks.")
-                print(f"Database latest block: {db_latest_block}")
-                print(f"Explorer latest block: {last_block_count}")
-                print("Use the /api/sync endpoint to sync missing blocks.")
-            else:
-                print(f"Database is up to date with latest block: {db_latest_block}")
+        cursor.close()
+        connection.close()
     except Exception as e:
-        print(f"Error checking for missed blocks: {e}")
-    finally:
-        if connection:
-            cursor.close()
-            connection.close()
+        print(f"Error getting last processed block: {e}")
     
-    print("Monitoring for block index changes every 5 seconds...")
-    
-    # Initialize data update timers
-    last_market_update = 0
-    last_money_supply_update = 0
-    last_money_supply_value = None
-    
-    # Track consecutive failures
-    consecutive_failures = 0
-    max_consecutive_failures = 5
-    
+    # Main loop to check for new blocks every 5 seconds
     while True:
         try:
-            # Check current block count
-            current_block_count = fetch_api_data("getblockcount")
-            if current_block_count is None:
-                print("Failed to get block count. Retrying in 5 seconds...")
-                consecutive_failures += 1
-                if consecutive_failures >= max_consecutive_failures:
-                    print(f"WARNING: {consecutive_failures} consecutive failures. Continuing to retry...")
-                time.sleep(5)
-                continue
+            # Get the latest block count
+            response = requests.get('https://explorer.fact0rn.io/api/getblockcount')
+            current_block_count = int(response.text.strip())
             
-            # Reset failure counter on success
-            consecutive_failures = 0
+            # If this is our first run or we haven't processed a block yet
+            if last_processed_block is None:
+                last_processed_block = current_block_count - 1
             
-            # Convert to integer
-            current_block_count = int(current_block_count)
-            
-            # Check if block count has changed
-            if current_block_count != last_block_count:
-                print(f"\nBlock index changed from {last_block_count} to {current_block_count}")
+            if current_block_count > last_processed_block:
+                print(f"New block(s) detected! Current block: {current_block_count}, Last processed: {last_processed_block}")
                 
-                # Check if we skipped any blocks
-                if current_block_count > last_block_count + 1:
-                    missed_blocks = current_block_count - last_block_count - 1
-                    print(f"WARNING: Missed {missed_blocks} blocks between {last_block_count} and {current_block_count}")
-                    
-                    # Process each missed block
-                    for missed_block in range(last_block_count + 1, current_block_count):
-                        print(f"Processing missed block {missed_block}...")
-                        
-                        # Fetch details for the missed block
-                        missed_block_hash, missed_block_time, missed_block_info = get_block_details(missed_block)
-                        if missed_block_time is None:
-                            print(f"Failed to fetch details for missed block {missed_block}. Skipping...")
-                            continue
-                        
-                        # Fetch details for the previous block
-                        prev_block_index = missed_block - 1
-                        prev_block_hash, prev_block_time, _ = get_block_details(prev_block_index)
-                        if prev_block_time is None:
-                            print(f"Failed to fetch previous block details for missed block {missed_block}. Skipping...")
-                            continue
-                        
-                        # Calculate time difference
-                        time_difference = missed_block_time - prev_block_time
-                        formatted_block_time = format_unix_time(missed_block_time)
-                        
-                        # Save the missed block data to the database
-                        save_to_database(
-                            missed_block,
-                            missed_block_hash,
-                            missed_block_time,
-                            formatted_block_time,
-                            time_difference
-                        )
-                        
-                        # Get block reward from coinbase transaction
-                        block_reward = get_block_reward(missed_block_info)
-                        
-                        # Save emissions data for the missed block
-                        save_emissions_data(missed_block, missed_block_time, formatted_block_time, block_reward)
+                # Process all missing blocks
+                for block_number in range(last_processed_block + 1, current_block_count + 1):
+                    try:
+                        print(f"Processing block {block_number}...")
+                        process_block(block_number)
+                        last_processed_block = block_number
+                        consecutive_failures = 0  # Reset failure counter on success
+                    except Exception as e:
+                        print(f"Error processing block {block_number}: {e}")
+                        consecutive_failures += 1
+                        if consecutive_failures >= max_consecutive_failures:
+                            print(f"Too many consecutive failures ({consecutive_failures}). Will try again next cycle.")
+                            break
+            else:
+                print(f"No new blocks. Latest block: {current_block_count}")
                 
-                # Fetch details for the new latest block
-                latest_block_hash, latest_block_time, block_info = get_block_details(current_block_count)
-                if latest_block_time is None:
-                    print("Failed to fetch latest block details. Continuing...")
-                    last_block_count = current_block_count
-                    time.sleep(5)
-                    continue
-
-                # Fetch details for the previous block
-                previous_block_index = current_block_count - 1
-                previous_block_hash, previous_block_time, _ = get_block_details(previous_block_index)
-                if previous_block_time is None:
-                    print("Failed to fetch previous block details. Continuing...")
-                    last_block_count = current_block_count
-                    time.sleep(5)
-                    continue
-
-                # Calculate time difference
-                time_difference = latest_block_time - previous_block_time
-                formatted_block_time = format_unix_time(latest_block_time)
-
-                # Save the latest block data to the database
-                save_to_database(
-                    current_block_count,
-                    latest_block_hash,
-                    latest_block_time,
-                    formatted_block_time,
-                    time_difference
-                )
-                
-                # Get block reward from coinbase transaction
-                block_reward = get_block_reward(block_info)
-                if block_reward is not None:
-                    print(f"Block Reward: {block_reward}")
-                
-                # Check if we should update money supply data (every 60 seconds)
-                current_time = int(time.time())
-                if current_time - last_money_supply_update >= 60:  # 60 seconds = 1 minute
-                    print("Updating money supply data...")
-                    money_supply = get_money_supply()
-                    if money_supply is not None:
-                        last_money_supply_value = money_supply
-                        last_money_supply_update = current_time
-                        print(f"Money Supply: {money_supply}")
-            
-                # Save emissions data with the latest money supply value
-                try:
-                    connection = get_db_connection()
-                    cursor = connection.cursor()
-                    
-                    # Check if we already have emissions data for this block
-                    cursor.execute("SELECT 1 FROM emissions WHERE current_block_number = %s", (current_block_count,))
-                    if not cursor.fetchone():
-                        # Insert emissions data
-                        cursor.execute("""
-                            INSERT INTO emissions (current_block_number, unix_timestamp, date_time, money_supply, block_reward)
-                            VALUES (%s, %s, %s, %s, %s)
-                            ON CONFLICT (current_block_number) DO NOTHING;
-                        """, (current_block_count, latest_block_time, formatted_block_time, last_money_supply_value, block_reward))
-                        
-                        connection.commit()
-                        print(f"Emissions data for block {current_block_count} saved to database.")
-                    else:
-                        print(f"Emissions data for block {current_block_count} already exists.")
-                except Exception as e:
-                    print(f"Error saving emissions data: {e}")
-                finally:
-                    if connection:
-                        cursor.close()
-                        connection.close()
-
-                # Fetch and display hashrate
-                current_hashrate = fetch_current_hashrate()
-                if current_hashrate is not None:
-                    print(f"Current Network Hashrate: {current_hashrate} hashes per second")
-
-                # Print details
-                print(f"Latest Block (Index {current_block_count}) Time (Unix): {latest_block_time}")
-                print(f"Previous Block (Index {previous_block_index}) Time (Unix): {previous_block_time}")
-                print(f"Hash of block {current_block_count}: {latest_block_hash}")
-                print(f"Latest block completed: {formatted_block_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-                print(f"Previous block completed: {format_unix_time(previous_block_time).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-                print(f"Time difference between blocks: {time_difference} seconds")
-
-                # Update last_block_count to the new current_block_count
-                last_block_count = current_block_count
-        
         except Exception as e:
-            print(f"Unexpected error in main loop: {e}")
-            print("Waiting 30 seconds before retrying...")
-            time.sleep(30)
-        finally:
-            # Check if we should update market data (every 5 minutes)
-            current_time = int(time.time())
-            if current_time - last_market_update >= 1500:  # 1500 seconds = 25 minutes
-                print("Updating market data...")
-                if save_market_data():
-                    last_market_update = current_time
-                    
-            # Check if we should update money supply outside of block updates (every 60 seconds)
-            if current_time - last_money_supply_update >= 60:
-                print("Updating money supply data (outside block update)...")
-                money_supply = get_money_supply()
-                if money_supply is not None:
-                    last_money_supply_value = money_supply
-                    last_money_supply_update = current_time
-                    print(f"Money Supply (outside block update): {money_supply}")
-
-            # Wait 5 seconds before checking again
-            time.sleep(5)
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nStopped by user.")
+            print(f"Error in main loop: {e}")
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                print(f"Too many consecutive failures ({consecutive_failures}). Waiting longer before next attempt.")
+                time.sleep(30)  # Wait longer after multiple failures
+        
+        # Sleep for 5 seconds before next check
+        time.sleep(5)
