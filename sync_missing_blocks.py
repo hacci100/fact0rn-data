@@ -22,12 +22,13 @@ MOVING_AVERAGES = [100, 672]  # Only using MA-100 and MA-672
 # Custom update_moving_averages function that uses the correct column names
 def update_moving_averages(connection, cursor, block_number):
     try:
-        # Get all available block times
+        # Get all available block time intervals
         cursor.execute("""
-            SELECT current_block_number, current_block_timestamp 
+            SELECT current_block_number, block_time_interval_seconds 
             FROM block_data 
-            WHERE current_block_timestamp IS NOT NULL
+            WHERE block_time_interval_seconds IS NOT NULL
             ORDER BY current_block_number DESC
+            LIMIT 1000
         """)
         results = cursor.fetchall()
         
@@ -36,34 +37,18 @@ def update_moving_averages(connection, cursor, block_number):
             print(f"No block data found for calculating moving averages.")
             return
             
-        # Extract block times and convert to seconds if needed
-        block_times = []
-        for row in results:
-            timestamp = row[1]
-            # Check if timestamp is in milliseconds or microseconds and convert to seconds
-            if timestamp > 10**10:  # Likely in microseconds
-                timestamp = timestamp / 1000000
-            elif timestamp > 10**7:  # Likely in milliseconds
-                timestamp = timestamp / 1000
-            block_times.append(timestamp)
-        
-        # Calculate time differences between consecutive blocks
-        time_diffs = []
-        for i in range(1, len(block_times)):
-            time_diff = block_times[i-1] - block_times[i]
-            # Ensure time difference is positive
-            if time_diff > 0:
-                time_diffs.append(time_diff)
+        # Extract block time intervals
+        time_intervals = [row[1] for row in results]
         
         updates = {}
         
         for period in MOVING_AVERAGES:
-            if len(time_diffs) < period:
-                print(f"Not enough data for {period}-block moving average. Need {period}, have {len(time_diffs)}.")
+            if len(time_intervals) < period:
+                print(f"Not enough data for {period}-block moving average. Need {period}, have {len(time_intervals)}.")
                 continue  # Skip if not enough data
                 
-            recent_diffs = time_diffs[:period]
-            avg = sum(recent_diffs) / period
+            recent_intervals = time_intervals[:period]
+            avg = sum(recent_intervals) / period
             
             # Check if the value is too large for the database column
             if avg >= 10**8:
