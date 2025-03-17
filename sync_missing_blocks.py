@@ -29,21 +29,46 @@ def update_moving_averages(connection, cursor, block_number):
             WHERE current_block_timestamp IS NOT NULL
             ORDER BY current_block_number DESC
         """)
-        block_times = [row[1] for row in cursor.fetchall()]
+        results = cursor.fetchall()
+        
+        # Check if we have any results
+        if not results:
+            print(f"No block data found for calculating moving averages.")
+            return
+            
+        # Extract block times and convert to seconds if needed
+        block_times = []
+        for row in results:
+            timestamp = row[1]
+            # Check if timestamp is in milliseconds or microseconds and convert to seconds
+            if timestamp > 10**10:  # Likely in microseconds
+                timestamp = timestamp / 1000000
+            elif timestamp > 10**7:  # Likely in milliseconds
+                timestamp = timestamp / 1000
+            block_times.append(timestamp)
+        
+        # Calculate time differences between consecutive blocks
+        time_diffs = []
+        for i in range(1, len(block_times)):
+            time_diff = block_times[i-1] - block_times[i]
+            # Ensure time difference is positive
+            if time_diff > 0:
+                time_diffs.append(time_diff)
         
         updates = {}
         
         for period in MOVING_AVERAGES:
-            if len(block_times) < period:
+            if len(time_diffs) < period:
+                print(f"Not enough data for {period}-block moving average. Need {period}, have {len(time_diffs)}.")
                 continue  # Skip if not enough data
                 
-            recent_blocks = block_times[:period]
-            avg = sum(recent_blocks) / period
+            recent_diffs = time_diffs[:period]
+            avg = sum(recent_diffs) / period
             
             # Check if the value is too large for the database column
             if avg >= 10**8:
-                print(f"Warning: Moving average for {period} blocks is too large ({avg}). Skipping update.")
-                continue
+                print(f"Warning: Moving average for {period} blocks is too large ({avg}). Scaling down.")
+                avg = 99999999.99  # Set to maximum allowed value
                 
             updates[f'moving_avg_{period}'] = round(avg, 2)
         
@@ -59,6 +84,8 @@ def update_moving_averages(connection, cursor, block_number):
             print(f"Updated averages for block {block_number}:")
             for period, avg in updates.items():
                 print(f" - {period.replace('moving_avg_','')}-block MA: {avg}s")
+        else:
+            print(f"No moving averages updated for block {block_number}.")
                 
     except Exception as e:
         print(f"Error updating moving averages: {e}")
