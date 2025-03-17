@@ -68,27 +68,30 @@ def save_to_database(block_index, block_hash, unix_timestamp, formatted_time, ti
         cursor.execute("""
             INSERT INTO block_data (
                 current_block_number, 
-                current_block_timestamp, 
-                previous_block_number, 
-                previous_block_timestamp, 
-                block_time_interval_seconds,
-                network_hashrate,
-                moving_avg_100
+                block_time, 
+                formatted_time, 
+                time_difference,
+                moving_avg_20,
+                moving_avg_50,
+                moving_avg_100,
+                moving_avg_200,
+                moving_avg_500,
+                moving_avg_672,
+                moving_avg_1000,
+                network_hashrate
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (current_block_number) DO NOTHING;
         """, (
             block_index, 
             unix_timestamp, 
-            block_index - 1, 
-            unix_timestamp - time_difference, 
+            formatted_time, 
             time_difference,
-            current_hashrate,
-            None
+            None, None, None, None, None, None, None,
+            current_hashrate
         ))
         
-        # Calculate and update 100-block moving average
-        update_moving_average_100(connection, cursor, block_index, time_difference)
+        update_moving_averages(connection, cursor, block_index)
         
         connection.commit()
         print(f"Data for block {block_index} saved to database.")
@@ -99,53 +102,45 @@ def save_to_database(block_index, block_hash, unix_timestamp, formatted_time, ti
             cursor.close()
             connection.close()
 
-def update_moving_average_100(connection, cursor, block_number, current_block_time=None):
-    """Calculate and update 100-block moving average for a block"""
+MOVING_AVERAGES = [20, 50, 100, 200, 500, 672, 1000]  # Configurable periods
+
+def update_moving_averages(connection, cursor, block_number):
     try:
-        # Get last 100 blocks time intervals for moving average calculation
+        # Get all available block times
         cursor.execute("""
-            SELECT current_block_number, block_time_interval_seconds 
+            SELECT current_block_number, block_time 
             FROM block_data 
-            WHERE current_block_number <= %s 
-            ORDER BY current_block_number DESC 
-            LIMIT 100
-        """, (block_number,))
+            WHERE block_time IS NOT NULL
+            ORDER BY current_block_number DESC
+        """)
+        block_times = [row[1] for row in cursor.fetchall()]
         
-        rows = cursor.fetchall()
+        updates = {}
         
-        # If we have the current block's time interval, add it to the list
-        # (it might not be in the database yet)
-        block_times = []
-        if current_block_time is not None:
-            block_times.append(current_block_time)
+        for period in MOVING_AVERAGES:
+            if len(block_times) < period:
+                continue  # Skip if not enough data
+                
+            recent_blocks = block_times[-period:]
+            avg = sum(recent_blocks) / period
+            updates[f'moving_avg_{period}'] = round(avg, 2)
+        
+        if updates:
+            set_clause = ", ".join([f"{col} = %s" for col in updates.keys()])
+            query = f"""
+                UPDATE block_data 
+                SET {set_clause} 
+                WHERE current_block_number = %s
+            """
+            cursor.execute(query, (*updates.values(), block_number))
             
-        # Add remaining times from database
-        for row in rows:
-            if row[0] != block_number:  # Avoid duplicate if current block is already in DB
-                block_times.append(row[1])
-        
-        # Require full 100 blocks for calculation
-        if len(block_times) < 100:
-            print(f"Insufficient blocks for MA-100 ({len(block_times)}/100)")
-            return
-            
-        # Keep only most recent 100 blocks
-        block_times = block_times[-100:]
-        
-        # Calculate using fixed window size
-        ma_100 = sum(block_times) / 100
-        
-        # Update the moving average in the block_data table
-        cursor.execute("""
-            UPDATE block_data 
-            SET moving_avg_100 = %s 
-            WHERE current_block_number = %s
-        """, (round(ma_100, 2), block_number))
-        
-        print(f"Updated 100-block moving average for block {block_number}: {round(ma_100, 2)} seconds (100-block window)")
-            
+            print(f"Updated averages for block {block_number}:")
+            for period, avg in updates.items():
+                print(f" - {period.replace('moving_avg_','')}-block MA: {avg}s")
+                
     except Exception as e:
-        print(f"Error updating moving average: {e}")
+        print(f"Error updating moving averages: {e}")
+        connection.rollback()
 
 def fetch_current_hashrate():
     """Fetch the current network hashrate from the Fact0rn API."""
@@ -326,14 +321,19 @@ def ensure_blocks_table_exists():
         
         # Create blocks table if it doesn't exist
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS blocks (
-                block_number INTEGER PRIMARY KEY,
-                block_time_seconds DOUBLE PRECISION,
-                timestamp INTEGER,
-                datetime TEXT,
-                moving_avg_20 DOUBLE PRECISION,
-                moving_avg_50 DOUBLE PRECISION,
-                moving_avg_100 DOUBLE PRECISION
+            CREATE TABLE IF NOT EXISTS block_data (
+                current_block_number INTEGER PRIMARY KEY,
+                block_time NUMERIC,
+                formatted_time TEXT,
+                time_difference NUMERIC,
+                moving_avg_20 NUMERIC,
+                moving_avg_50 NUMERIC,
+                moving_avg_100 NUMERIC,
+                moving_avg_200 NUMERIC,
+                moving_avg_500 NUMERIC,
+                moving_avg_672 NUMERIC,
+                moving_avg_1000 NUMERIC,
+                network_hashrate NUMERIC
             );
         """)
         
