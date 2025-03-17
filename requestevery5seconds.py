@@ -71,23 +71,18 @@ def save_to_database(block_index, block_hash, unix_timestamp, formatted_time, ti
                 block_time, 
                 formatted_time, 
                 time_difference,
-                moving_avg_20,
-                moving_avg_50,
                 moving_avg_100,
-                moving_avg_200,
-                moving_avg_500,
                 moving_avg_672,
-                moving_avg_1000,
                 network_hashrate
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (current_block_number) DO NOTHING;
         """, (
             block_index, 
             unix_timestamp, 
             formatted_time, 
             time_difference,
-            None, None, None, None, None, None, None,
+            None, None,
             current_hashrate
         ))
         
@@ -102,7 +97,7 @@ def save_to_database(block_index, block_hash, unix_timestamp, formatted_time, ti
             cursor.close()
             connection.close()
 
-MOVING_AVERAGES = [20, 50, 100, 200, 500, 672, 1000]  # Configurable periods
+MOVING_AVERAGES = [100, 672]  # Only using MA-100 and MA-672
 
 def update_moving_averages(connection, cursor, block_number):
     try:
@@ -121,7 +116,7 @@ def update_moving_averages(connection, cursor, block_number):
             if len(block_times) < period:
                 continue  # Skip if not enough data
                 
-            recent_blocks = block_times[-period:]
+            recent_blocks = block_times[:period]
             avg = sum(recent_blocks) / period
             updates[f'moving_avg_{period}'] = round(avg, 2)
         
@@ -326,13 +321,8 @@ def ensure_blocks_table_exists():
                 block_time NUMERIC,
                 formatted_time TEXT,
                 time_difference NUMERIC,
-                moving_avg_20 NUMERIC,
-                moving_avg_50 NUMERIC,
                 moving_avg_100 NUMERIC,
-                moving_avg_200 NUMERIC,
-                moving_avg_500 NUMERIC,
                 moving_avg_672 NUMERIC,
-                moving_avg_1000 NUMERIC,
                 network_hashrate NUMERIC
             );
         """)

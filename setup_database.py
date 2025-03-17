@@ -58,6 +58,16 @@ try:
         print("Column moving_avg_100 added successfully!")
     else:
         print("Column moving_avg_100 already exists.")
+        
+    # Check if moving_avg_672 column already exists in block_data, add it if not
+    print("Checking if moving_avg_672 column exists in block_data...")
+    cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'block_data' AND column_name = 'moving_avg_672';")
+    if not cursor.fetchone():
+        print("Adding moving_avg_672 column to block_data...")
+        cursor.execute("ALTER TABLE block_data ADD COLUMN moving_avg_672 numeric(10,2);")
+        print("Column moving_avg_672 added successfully!")
+    else:
+        print("Column moving_avg_672 already exists.")
 
     conn.commit()
     print('Database setup completed successfully')

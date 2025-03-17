@@ -69,28 +69,27 @@ def get_blocks():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # First check if moving_avg_100 column exists
-        cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'block_data' AND column_name = 'moving_avg_100';")
-        has_moving_avg = cursor.fetchone() is not None
+        # Check if moving average columns exist
+        cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'block_data' AND column_name IN ('moving_avg_100', 'moving_avg_672');")
+        existing_columns = [row[0] for row in cursor.fetchall()]
+        has_ma_100 = 'moving_avg_100' in existing_columns
+        has_ma_672 = 'moving_avg_672' in existing_columns
         
-        # Construct the query to get block data with moving average from block_data table
-        if has_moving_avg:
-            query = """
-                SELECT 
-                    current_block_number, 
-                    block_time_interval_seconds,
-                    current_block_timestamp,
-                    moving_avg_100
-                FROM block_data
-            """
-        else:
-            query = """
-                SELECT 
-                    current_block_number, 
-                    block_time_interval_seconds,
-                    current_block_timestamp
-                FROM block_data
-            """
+        # Construct the query to get block data with moving averages from block_data table
+        query = """
+            SELECT 
+                current_block_number, 
+                block_time_interval_seconds,
+                current_block_timestamp
+        """
+        
+        # Add moving average columns to the query if they exist
+        if has_ma_100:
+            query += ", moving_avg_100"
+        if has_ma_672:
+            query += ", moving_avg_672"
+            
+        query += " FROM block_data"
         
         conditions = []
         
@@ -123,9 +122,14 @@ def get_blocks():
                 'datetime': datetime.datetime.fromtimestamp(row[2]).strftime('%Y-%m-%d %H:%M:%S')
             }
             
-            # Add moving average if it exists and the column exists
-            if has_moving_avg and len(row) > 3 and row[3] is not None:
-                block_data['moving_avg_100'] = float(row[3])
+            # Add moving averages if they exist
+            col_index = 3
+            if has_ma_100 and len(row) > col_index and row[col_index] is not None:
+                block_data['moving_avg_100'] = float(row[col_index])
+                col_index += 1
+                
+            if has_ma_672 and len(row) > col_index and row[col_index] is not None:
+                block_data['moving_avg_672'] = float(row[col_index])
                 
             blocks.append(block_data)
         
@@ -149,14 +153,29 @@ def get_block(block_number):
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Get block data
-        cursor.execute("""
+        # Check if moving average columns exist
+        cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'block_data' AND column_name IN ('moving_avg_100', 'moving_avg_672');")
+        existing_columns = [row[0] for row in cursor.fetchall()]
+        has_ma_100 = 'moving_avg_100' in existing_columns
+        has_ma_672 = 'moving_avg_672' in existing_columns
+        
+        # Construct the query based on available columns
+        query = """
             SELECT current_block_number, current_block_timestamp, 
                    previous_block_number, previous_block_timestamp,
                    block_time_interval_seconds, network_hashrate
-            FROM block_data
-            WHERE current_block_number = %s
-        """, (block_number,))
+        """
+        
+        # Add moving average columns if they exist
+        if has_ma_100:
+            query += ", moving_avg_100"
+        if has_ma_672:
+            query += ", moving_avg_672"
+            
+        query += " FROM block_data WHERE current_block_number = %s"
+        
+        # Execute the query
+        cursor.execute(query, (block_number,))
         block = cursor.fetchone()
         
         if not block:
@@ -177,6 +196,15 @@ def get_block(block_number):
             'block_time_seconds': block[4],
             'network_hashrate': float(block[5]) if block[5] is not None else None
         }
+        
+        # Add moving averages if they exist
+        col_index = 6
+        if has_ma_100 and len(block) > col_index and block[col_index] is not None:
+            result['moving_avg_100'] = float(block[col_index])
+            col_index += 1
+            
+        if has_ma_672 and len(block) > col_index and block[col_index] is not None:
+            result['moving_avg_672'] = float(block[col_index])
         
         # Check if emissions data exists for this block
         cursor.execute("""
@@ -202,6 +230,12 @@ def get_stats():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        
+        # Check if moving average columns exist
+        cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'block_data' AND column_name IN ('moving_avg_100', 'moving_avg_672');")
+        existing_columns = [row[0] for row in cursor.fetchall()]
+        has_ma_100 = 'moving_avg_100' in existing_columns
+        has_ma_672 = 'moving_avg_672' in existing_columns
         
         # Get latest block
         cursor.execute("""
@@ -240,28 +274,72 @@ def get_stats():
         """)
         total_blocks = cursor.fetchone()[0]
         
-        # Get latest money supply if available
-        money_supply = None
+        # Get latest moving averages if they exist
+        moving_averages = {}
+        
+        if has_ma_100:
+            cursor.execute("""
+                SELECT moving_avg_100
+                FROM block_data
+                WHERE moving_avg_100 IS NOT NULL
+                ORDER BY current_block_number DESC
+                LIMIT 1
+            """)
+            ma_100 = cursor.fetchone()
+            if ma_100 and ma_100[0] is not None:
+                moving_averages['ma_100'] = float(ma_100[0])
+        
+        if has_ma_672:
+            cursor.execute("""
+                SELECT moving_avg_672
+                FROM block_data
+                WHERE moving_avg_672 IS NOT NULL
+                ORDER BY current_block_number DESC
+                LIMIT 1
+            """)
+            ma_672 = cursor.fetchone()
+            if ma_672 and ma_672[0] is not None:
+                moving_averages['ma_672'] = float(ma_672[0])
+        
+        # Get latest market data
         cursor.execute("""
-            SELECT money_supply
+            SELECT price, difficulty, date_time
+            FROM market_data
+            ORDER BY unix_timestamp DESC
+            LIMIT 1
+        """)
+        market = cursor.fetchone()
+        
+        # Get latest emissions data
+        cursor.execute("""
+            SELECT money_supply, block_reward
             FROM emissions
             ORDER BY current_block_number DESC
             LIMIT 1
         """)
-        supply_result = cursor.fetchone()
-        if supply_result:
-            money_supply = float(supply_result[0]) if supply_result[0] is not None else None
+        emissions = cursor.fetchone()
         
+        # Construct result
+        result = {
+            'latest_block': latest_block,
+            'total_blocks': total_blocks,
+            'avg_block_time': float(avg_block_time) if avg_block_time is not None else None,
+            'avg_hashrate': float(avg_hashrate) if avg_hashrate is not None else None,
+            'moving_averages': moving_averages
+        }
+        
+        if market:
+            result['price'] = float(market[0]) if market[0] is not None else None
+            result['difficulty'] = float(market[1]) if market[1] is not None else None
+            result['market_data_time'] = market[2].strftime('%Y-%m-%d %H:%M:%S') if market[2] is not None else None
+            
+        if emissions:
+            result['money_supply'] = float(emissions[0]) if emissions[0] is not None else None
+            result['block_reward'] = float(emissions[1]) if emissions[1] is not None else None
+            
         cursor.close()
         conn.close()
-        
-        return jsonify({
-            'latest_block': latest_block,
-            'total_blocks_recorded': total_blocks,
-            'average_block_time': float(avg_block_time) if avg_block_time is not None else None,
-            'average_hashrate': float(avg_hashrate) if avg_hashrate is not None else None,
-            'money_supply': money_supply
-        })
+        return jsonify(result)
     except Exception as e:
         logger.error(f"Error in get_stats: {e}")
         return jsonify({'error': str(e)}), 500
@@ -272,14 +350,28 @@ def get_all_data():
         conn = get_db_connection()
         cursor = conn.cursor()
         
+        # Check if moving average columns exist
+        cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'block_data' AND column_name IN ('moving_avg_100', 'moving_avg_672');")
+        existing_columns = [row[0] for row in cursor.fetchall()]
+        has_ma_100 = 'moving_avg_100' in existing_columns
+        has_ma_672 = 'moving_avg_672' in existing_columns
+        
         # Get all block data
-        cursor.execute("""
+        query = """
             SELECT current_block_number, current_block_timestamp, 
                    previous_block_number, previous_block_timestamp,
                    block_time_interval_seconds, network_hashrate
-            FROM block_data
-            ORDER BY current_block_number DESC
-        """)
+        """
+        
+        # Add moving average columns if they exist
+        if has_ma_100:
+            query += ", moving_avg_100"
+        if has_ma_672:
+            query += ", moving_avg_672"
+            
+        query += " FROM block_data ORDER BY current_block_number DESC"
+        
+        cursor.execute(query)
         blocks = cursor.fetchall()
         
         result = []
@@ -296,6 +388,15 @@ def get_all_data():
                 'block_time_seconds': block[4],
                 'network_hashrate': float(block[5]) if block[5] is not None else None
             }
+            
+            # Add moving averages if they exist
+            col_index = 6
+            if has_ma_100 and len(block) > col_index and block[col_index] is not None:
+                block_data['moving_avg_100'] = float(block[col_index])
+                col_index += 1
+                
+            if has_ma_672 and len(block) > col_index and block[col_index] is not None:
+                block_data['moving_avg_672'] = float(block[col_index])
             
             # Get emissions data for this block if available
             cursor.execute("""
