@@ -12,10 +12,51 @@ from requestevery5seconds import (
     get_block_details,
     format_unix_time,
     fetch_current_hashrate,
-    update_moving_averages,
     get_block_reward,
     save_emissions_data
 )
+
+# Define moving averages periods
+MOVING_AVERAGES = [100, 672]  # Only using MA-100 and MA-672
+
+# Custom update_moving_averages function that uses the correct column names
+def update_moving_averages(connection, cursor, block_number):
+    try:
+        # Get all available block times
+        cursor.execute("""
+            SELECT current_block_number, current_block_timestamp 
+            FROM block_data 
+            WHERE current_block_timestamp IS NOT NULL
+            ORDER BY current_block_number DESC
+        """)
+        block_times = [row[1] for row in cursor.fetchall()]
+        
+        updates = {}
+        
+        for period in MOVING_AVERAGES:
+            if len(block_times) < period:
+                continue  # Skip if not enough data
+                
+            recent_blocks = block_times[:period]
+            avg = sum(recent_blocks) / period
+            updates[f'moving_avg_{period}'] = round(avg, 2)
+        
+        if updates:
+            set_clause = ", ".join([f"{col} = %s" for col in updates.keys()])
+            query = f"""
+                UPDATE block_data 
+                SET {set_clause} 
+                WHERE current_block_number = %s
+            """
+            cursor.execute(query, (*updates.values(), block_number))
+            
+            print(f"Updated averages for block {block_number}:")
+            for period, avg in updates.items():
+                print(f" - {period.replace('moving_avg_','')}-block MA: {avg}s")
+                
+    except Exception as e:
+        print(f"Error updating moving averages: {e}")
+        connection.rollback()
 
 def sync_missing_blocks(start_block, end_block):
     """
@@ -87,7 +128,7 @@ def sync_missing_blocks(start_block, end_block):
                 current_hashrate
             ))
             
-            # Update moving averages
+            # Update moving averages using our custom function
             update_moving_averages(conn, cursor, block_index)
             
             # Get block reward from coinbase transaction
