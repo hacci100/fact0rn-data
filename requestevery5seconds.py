@@ -64,23 +64,38 @@ def save_to_database(block_index, block_hash, unix_timestamp, formatted_time, ti
         # Fetch current hashrate
         current_hashrate = fetch_current_hashrate()
         
+        # Get previous block number (current - 1)
+        previous_block_number = block_index - 1
+        
+        # Fetch previous block timestamp if available
+        previous_block_timestamp = None
+        try:
+            cursor.execute("SELECT current_block_timestamp FROM block_data WHERE current_block_number = %s", (previous_block_number,))
+            result = cursor.fetchone()
+            if result:
+                previous_block_timestamp = result[0]
+        except Exception as e:
+            print(f"Error fetching previous block timestamp: {e}")
+        
         # Insert into block_data table with correct column names
         cursor.execute("""
             INSERT INTO block_data (
                 current_block_number, 
-                block_time, 
-                formatted_time, 
-                time_difference,
+                current_block_timestamp, 
+                previous_block_number,
+                previous_block_timestamp,
+                block_time_interval_seconds,
                 moving_avg_100,
                 moving_avg_672,
                 network_hashrate
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (current_block_number) DO NOTHING;
         """, (
             block_index, 
             unix_timestamp, 
-            formatted_time, 
+            previous_block_number,
+            previous_block_timestamp,
             time_difference,
             None, None,
             current_hashrate
@@ -103,9 +118,9 @@ def update_moving_averages(connection, cursor, block_number):
     try:
         # Get all available block times
         cursor.execute("""
-            SELECT current_block_number, block_time 
+            SELECT current_block_number, current_block_timestamp 
             FROM block_data 
-            WHERE block_time IS NOT NULL
+            WHERE current_block_timestamp IS NOT NULL
             ORDER BY current_block_number DESC
         """)
         block_times = [row[1] for row in cursor.fetchall()]
@@ -318,9 +333,10 @@ def ensure_blocks_table_exists():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS block_data (
                 current_block_number INTEGER PRIMARY KEY,
-                block_time NUMERIC,
-                formatted_time TEXT,
-                time_difference NUMERIC,
+                current_block_timestamp NUMERIC,
+                previous_block_number INTEGER,
+                previous_block_timestamp NUMERIC,
+                block_time_interval_seconds NUMERIC,
                 moving_avg_100 NUMERIC,
                 moving_avg_672 NUMERIC,
                 network_hashrate NUMERIC

@@ -39,6 +39,12 @@ def update_moving_averages(connection, cursor, block_number):
                 
             recent_blocks = block_times[:period]
             avg = sum(recent_blocks) / period
+            
+            # Check if the value is too large for the database column
+            if avg >= 10**8:
+                print(f"Warning: Moving average for {period} blocks is too large ({avg}). Skipping update.")
+                continue
+                
             updates[f'moving_avg_{period}'] = round(avg, 2)
         
         if updates:
